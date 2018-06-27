@@ -1,0 +1,246 @@
+---
+title: "Kickstarter Project - xgBoost Models Trainings and Tuning"
+output: html_notebook
+---
+First of all, we need to load all the necessary libraries. Also make sure your working directory has a folder called `model` which contains all the caret objects. Otherwise this script will probably take couple days to run.
+
+```{r}
+library(caret)
+library(xgboost)
+library(ROCR)
+```
+
+We will also need to load and preprocess the data.
+
+```{r}
+# load rds object
+train <- readRDS('../rdata/df_initital_success_train.rds')
+val <- readRDS('../rdata/df_initital_success_validate.rds')
+
+# create one-hot-encoded model matrix (for caret)
+mmtd<-model.matrix(state~., data=train)
+mmtd<-mmtd[,2:ncol(mmtd)]
+mmtl<-train$state
+
+mmvd<-model.matrix(state~., data=val)
+mmvd<-mmvd[,2:ncol(mmvd)]
+mmvl<-val$state
+
+# create xgb.DMatrix (for xgboost)
+dtrain<-xgb.DMatrix(data=mmtd, label=mmtl)
+dval<-xgb.DMatrix(data=mmvd, label=mmvl)
+```
+
+After that, we define the general `trControl` object.
+
+```{r}
+# define general trControl
+tC = trainControl(method="cv", number=5, verboseIter = TRUE)
+```
+
+We then define the parameters for our first sweep.
+ref: https://www.analyticsvidhya.com/blog/2016/03/complete-guide-parameter-tuning-xgboost-with-codes-python/
+
+
+```{r}
+# first sweep
+tGrid=expand.grid(eta=seq(0.1,0.5,0.1),
+                  max_depth=seq(1,6,1),
+                  subsample=c(0.5,1),
+                  nrounds=1000,
+                  gamma=c(0,1),
+                  colsample_bytree=1,
+                  min_child_weight=1)
+```
+
+Due to time constraint, a trained caret object could be used provided it's in the working environment. Otherwise, the actual training will starts (takes ~7 hours or more)
+
+```{r}
+# load caret train object if exists, otherwise run caret train
+if (file.exists('../model/xgbt.caret')) {
+  load('../model/xgbt.caret')
+  } else {
+  xgbt<-train(x=mmtd, y=mmtl, method='xgbTree', metric='Accuracy', maximize=TRUE, tuneGrid = tGrid, trControl=tC, num.threads = 7)
+  save(xgbt, file = '../model/xgbt.caret')
+  }
+```
+
+With the train object, we could first take a look at the plots from the all the tuning parameters.
+
+```{r}
+plot(xgbt)
+xgbt$bestTune
+```
+
+It's clear that a lower shrinkage value (`eta`)  and a Max Tree Depth of 3 improves accuracy slightly, while changing subsampling and gamma didn't have huge impact.
+
+Let's take a look at the features importance.
+
+```{r}
+impt<-xgb.importance(xgbt$finalModel$xNames, xgbt$finalModel)
+ggplot(impt, aes(factor(impt$Feature, levels = impt$Feature[order(impt$Gain)]), Gain)) +geom_bar(stat = "identity") + coord_flip()
+impt
+```
+
+From the bar-chart in descending order, we can see `unemployment_rate` has the biggest impact to the model, while `launched_at_month` barely provided any impact.
+
+Before removing any features, another sweep is conducted to observe the impact of xgBoost iterations to accuracy.
+We took a look at the difference between 1000 - 5000 iterations.
+
+```{r}
+#second sweep
+tGrid=expand.grid(eta=0.1,
+                  max_depth=3,
+                  subsample=1,
+                  nrounds=seq(1000,5000,100),
+                  gamma=0,
+                  colsample_bytree=1,
+                  min_child_weight=1)
+```
+
+```{r}
+# load caret train object if exists, otherwise run caret train
+if (file.exists('../model/xgbt2.caret')) {
+  load('../model/xgbt2.caret')
+  } else {
+  xgbt2<-train(x=mmtd, y=mmtl, method='xgbTree', metric='Accuracy', maximize=TRUE, tuneGrid = tGrid, trControl=tC, num.threads = 7)
+  save(xgbt2, file = '../model/xgbt2.caret')
+  }
+```
+
+```{r}
+plot(xgbt2)
+xgbt2$bestTune
+```
+
+It's clear that as the model goes through more iterations, the lower the accuracy (though not by a lot). But what about lower iterations? We will do another sweep! This time, from 100 - 2000 iterations.
+
+```{r}
+#third sweep
+tGrid=expand.grid(eta=0.1,
+                  max_depth=3,
+                  subsample=1,
+                  nrounds=seq(100,2000,100),
+                  gamma=0,
+                  colsample_bytree=1,
+                  min_child_weight=1)
+```
+
+```{r}
+# load caret train object if exists, otherwise run caret train
+if (file.exists('../model/xgbt3.caret')) {
+  load('../model/xgbt3.caret')
+  } else {
+  xgbt3<-train(x=mmtd, y=mmtl, method='xgbTree', metric='Accuracy', maximize=TRUE, tuneGrid = tGrid, trControl=tC, num.threads = 7)
+  save(xgbt3, file = '../model/xgbt3.caret')
+  }
+```
+
+```{r}
+plot(xgbt3)
+xgbt3$bestTune
+```
+Looks like the accuracy plateaued at 1000 iterations (again, not by a lot). We will continue future sweep with 1000 iterations set.
+
+Going back to the first sweep where ``launched_at_month` contributed little to the model, we also see `launched_at_holiday` and `deadline_holiday` provided little impact to the model as well. This suggests the success of a Kickstarter project has little to do with if the project is launched in a particular month, launched during a holiday, or ended during a holiday.
+
+Since these features are not important, let's remove them from the model and do another parameter sweep (with additional parameters). This time, we will look at further impact from `gamma` and `colsample_bytree`. We will also look at shrinkage factor as the first sweep suggested a lower value improves the prediction.
+
+```{r}
+# remove unwanted columns
+remove <- grep('launched_at_month|launched_at_holiday|deadline_holiday', names(train))
+train <- train[-remove]
+val <- val[-remove]
+
+# remove features
+mmtd<-model.matrix(state~., data=train)
+mmtd<-mmtd[,2:ncol(mmtd)]
+mmtl<-train$state
+
+mmvd<-model.matrix(state~., data=val)
+mmvd<-mmvd[,2:ncol(mmvd)]
+mmvl<-val$state
+
+# create xgb.DMatrix (for xgboost)
+dtrain<-xgb.DMatrix(data=mmtd, label=mmtl)
+dval<-xgb.DMatrix(data=mmvd, label=mmvl)
+```
+
+
+```{r}
+#final sweep
+tGrid=expand.grid(eta=seq(0.01,0.1,0.01),
+                  max_depth=3,
+                  subsample=1,
+                  nrounds=1000,
+                  gamma=c(0,1,5,10),
+                  colsample_bytree=seq(0.2,1,0.1),
+                  min_child_weight=1)
+```
+
+
+```{r}
+# load caret train object if exists, otherwise run caret train
+if (file.exists('../model/xgbtf.caret')) {
+  load('../model/xgbtf.caret')
+  } else {
+  xgbtf<-train(x=mmtd, y=mmtl, method='xgbTree', metric='Accuracy', maximize=TRUE, tuneGrid = tGrid, trControl=tC, num.threads = 7)
+  save(xgbtf, file = '../model/xgbtf.caret')
+  }
+```
+
+```{r}
+plot(xgbtf)
+xgbtf$bestTune
+```
+
+It looks like no matter what, the tuning could not break the curse of 80 % accuracy - this might be the limitation of the features we engineered. The tuning plot shows that a `gamma` of 0 provides the highest accuracy, while the accuracy changes from modifying `eta` stabilizes as it approaches 0.1. Finally, `colsample_bytree` of 0.4 gives the highest accuracy (again, not by a lot). This will be the final model before submitting to the validation data.
+
+```{r}
+final_xgb <- xgb.train(data=dtrain, max.depth=3, eta=0.1, gamma=0, colsample_by_tree=0.4, min_child_weight=1, subsample=1,nthread = 7, nround=1000, objective = "binary:logistic")
+```
+
+With the final model, let's take a look at the features importance again.
+
+```{r}
+impt<-xgb.importance(colnames(dtrain), final_xgb)
+ggplot(impt, aes(factor(impt$Feature, levels = impt$Feature[order(impt$Gain)]), Gain)) +geom_bar(stat = "identity") + coord_flip()
+impt
+```
+
+This looks similar to the one before. The final step is to look at the validation accuracy.
+
+```{r}
+pred <- predict(final_xgb, dval)
+table(mmvl, pred > 0.5)
+sum(diag(table(mmvl, pred > 0.5)))/length(mmvl)
+```
+
+```{r}
+rocr.pred <- prediction(pred, mmvl)
+logPerformance <- performance(rocr.pred, "tpr", "fpr")
+plot(logPerformance, colorize = TRUE)
+abline(0, 1)
+as.numeric(performance(rocr.pred, "auc")@y.values)
+```
+
+```{r}
+# save the model matrix
+save(mmtd, file = '../rdata/mmtd.rda')
+save(mmtl, file = '../rdata/mmtl.rda')
+save(mmvd, file = '../rdata/mmvd.rda')
+save(mmvl, file = '../rdata/mmvl.rda')
+```
+
+```{r}
+# misc notes
+
+#> (6677+4274)/nrow(val)
+#[1] 0.7966681                <--base (xdb.DMatrix) (not using OHE)
+#> (6663+4311)/nrow(val)
+#[1] 0.7983413                 <- using OHE
+#> (6644+4335)/nrow(val)
+#[1] 0.7987051               <- remove month + using OHE
+#> (6659+4328)/nrow(val)
+#[1] 0.7992871             <- remove month / launched_at_holiday / deadline_holiday, + using OHE
+```

@@ -1,0 +1,120 @@
+---
+title: "Kickstarter Project - Exploratory Data Analysis"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(chron)
+library(lubridate)
+library(timeDate)
+library(readr)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(rworldmap)
+```
+
+
+How many successful projects so far?
+```{r}
+#Exploratory Data Analysis(EDA)
+df_initital_data_exploration <- readRDS('../rdata/df_initital_data_exploration.rds')
+
+df_successful <- filter(df_initital_data_exploration,state =='successful')
+df_failed <- filter(df_initital_data_exploration,state == 'failed')
+prop.table(table(df_initital_data_exploration$state))*100
+```
+
+#
+Number of projects launched per category 
+```{r}
+ggplot(data=df_initital_data_exploration, aes(x=year(created_date))) +
+  geom_bar(colour="darkblue", fill="skyblue1") +
+  ylab('Count') +
+  facet_wrap(~category_clean)
+```
+
+
+
+
+```{r}
+#add success vs failure rate over the years 
+state.df <- df_initital_data_exploration %>%
+  filter(year(created_date)!="2018", state %in% c("successful", "failed")) %>%
+  group_by(year=year(created_date), state) %>%
+  summarize(count=n()) %>%
+  mutate(pct=count/sum(count)) %>%
+  arrange(desc(state))
+
+ggplot(state.df, aes(year, pct, fill=state)) + geom_bar(stat="identity") + 
+  ggtitle("Success vs. Failure Rate by Launched Year") + 
+  xlab("Year") + ylab("Percentage") + scale_x_discrete(limits=c(2009:2017)) + 
+  scale_y_continuous(labels=scales::percent) + 
+  scale_fill_discrete(name="Status", breaks=c("successful", "failed"),
+                      labels=c("Success", "Failure"),h = c(50, 100) )+ 
+  geom_text(aes(label=paste0(round(pct*100,1),"%")), position=position_stack(vjust=0.5), 
+            colour="white", size=5) + 
+  theme(plot.title=element_text(hjust=0.5), axis.title=element_text(size=12, face="bold"), 
+        axis.text.x=element_text(size=12), legend.position="bottom", 
+        legend.title=element_text(size=12, face="bold"))
+```
+
+
+```{r}
+################################
+#number of projects lauched per year(2009-2018)
+
+year.freq <- df_initital_data_exploration %>%
+  filter(year(created_date)!="1970") %>%
+  group_by(year=year(created_date)) %>%
+  summarize(count=n())
+
+ggplot(year.freq, aes(year, count, fill=count)) + geom_bar(stat="identity") + 
+  ggtitle("Number of Projects by Launch Year") + xlab("Year") + ylab("Frequency") + 
+  scale_x_discrete(limits=c(2009:2018)) + 
+  geom_text(aes(label=paste0(count)), vjust=-0.5) + 
+  theme(plot.title=element_text(hjust=0.5), axis.title=element_text(size=12, face="bold"), 
+        axis.text.x=element_text(size=12), legend.position="null") + 
+  scale_fill_gradient(low="skyblue1", high="royalblue4")
+```
+
+
+```{r}
+#NLP on blurb data
+
+corpus = Corpus(VectorSource(df_initital_data_exploration$blurb))
+#Change all the text to lower case.
+# Here, that operation is 'tolower', i.e., 'to lowercase'
+corpus = tm_map(corpus, tolower)
+
+# Remove all punctuation
+corpus = tm_map(corpus, removePunctuation)
+
+# Remove stop words
+
+corpus = tm_map(corpus, removeWords, c("help","new", stopwords("english")))
+
+# Stem our document
+corpus = tm_map(corpus, stemDocument)
+
+frequencies = DocumentTermMatrix(corpus)
+
+# Words that appear at least 50 times:
+findFreqTerms(frequencies, lowfreq=50)
+# Words that appear at least 20 times:
+findFreqTerms(frequencies, lowfreq=20)
+
+sparse = removeSparseTerms(frequencies, 0.99)
+
+# 0.5% of the tweets or more (= 6 or more)
+sparse = removeSparseTerms(frequencies, 0.995)
+
+sparse = removeSparseTerms(frequencies, 0.99)
+blurbTM = as.data.frame(as.matrix(sparse))
+colnames(blurbTM) = make.names(colnames(blurbTM))
+
+wordcloud(corpus, max.words = 400, random.order = FALSE, rot.per = .1, 
+          colors = brewer.pal(8, "Dark2"))
+
+```

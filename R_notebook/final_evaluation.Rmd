@@ -1,0 +1,156 @@
+---
+title: "Kickstarter Project - Final Evaluation"
+output: html_notebook
+---
+
+With xgBoost chosen as the model with the highest validation accuracy, we will proceed with the final evaluation on the yet untouched test data set, and last but not least, the live data set. Live data set is the portion of the data that were still being kickstarted at the time of collection, but are all finished at this point. This is the **TRUE** test data, projects that we need to predict whether they succeed or not.
+
+Let's start by loading the necessary library
+
+```{r}
+library(rvest)
+library(jsonlite)
+library(xgboost)
+library(dplyr)
+```
+
+We will also need to load all the necessary R objects.
+
+```{r}
+df_master<-readRDS('../rdata/df_master.rds')
+load('../rdata/mmtd.rda') # model matrix - training data
+load('../rdata/mmtl.rda') # model matrix - training labels
+load('../rdata/mmvd.rda') # model matrix - validation data
+load('../rdata/mmvl.rda') # model matri - validation labels
+```
+
+Let's start by creating the *TRUE* test data set from the "live" data
+
+```{r}
+# subsetting data with all the columns needed
+# this is unnecessary if 'live_data.rda' is available
+live_data <- select(df_master,c( 
+  goal,
+  urls,
+  category_clean,
+  launched_at_month,
+  created_to_launched_days,
+  launched_to_deadline_days,
+  launched_at_holiday,
+  deadline_holiday,
+  sp500_close_percent_change_launched_at,
+  unemployment_rate,
+  early.bird.frac,
+  limited.frac,
+  ship.intl,
+  popularity,
+  median.tier.cost,
+  tier.low,
+  tier.med,
+  tier.high,
+  state
+))
+
+# subsetting only live projects
+live_data <- filter(live_data,state =='live')
+
+# obtaining web address for live projects
+live_data$page<-apply(live_data, 1, function(x){return(fromJSON(x['urls'])$web$project)})
+```
+
+Here we Define helper function to web-scrape whether a project succeeds.
+
+```{r}
+getStatus<-function(x){
+  page<-read_html(x)
+  count<-length(page %>% html_nodes('.js-campaign-state'))
+  if (count==0) {
+    return('successful')
+  } else {
+    return('failed')
+  }
+}
+```
+
+Due to time constraint, an object with the web-scrapped data is already available. But in case it's not, this will regenerate the data.
+
+```{r}
+if (file.exists('../rdata/live_data.rda')) {
+  load('../rdata/live_data.rda')
+} else {
+  x<-lapply(live_data$page, getStatus)
+  live_data$state<-unlist(lapply(x,"[",1))
+  live_data$state <- ifelse(live_data$state == 'successful',1,0)
+  live_data<-live_data[!names(live_data) %in% c('urls','page')]
+  save(live_data, file='../rdata/live_data.rda')
+}
+
+# create one-hot-encoding
+mmltd<-model.matrix(state~.-launched_at_month-launched_at_holiday-deadline_holiday, data=live_data)
+mmltd<-mmltd[,2:ncol(mmltd)]
+mmltl<-live_data$state
+```
+
+We will also need to process the test data
+
+```{r}
+# test data
+df_initital_success_test<-readRDS('../rdata/df_initital_success_test.rds')
+remove <- grep('launched_at_month|launched_at_holiday|deadline_holiday', names(df_initital_success_test))
+df_initital_success_test <- df_initital_success_test[-remove]
+mmzd<-model.matrix(state~., data=df_initital_success_test)
+mmzd<-mmzd[,2:ncol(mmzd)]
+mmzl<-df_initital_success_test$state
+```
+
+It's time for evaluation! But first let's re-run the train and validation data and see how the xgboost model performs.
+
+```{r}
+# load the trained model
+load('../model/xgbtf.caret')
+
+# get bestTune
+xgbtf$bestTune
+
+# create xgb.DMatrix (for xgboost)
+dtrain<-xgb.DMatrix(data=mmtd, label=mmtl)
+dval<-xgb.DMatrix(data=mmvd, label=mmvl)
+dtest<-xgb.DMatrix(data=mmzd, label=mmzl)
+dlivetest<-xgb.DMatrix(data=mmltd, label=mmltl)
+```
+
+Due to some weird quirks of xgboost, we can't use the caret's *finalModel* attribute since it's based on factored label (while xgboost requires numeric label). Additionally, we also can't use caret's *bestTune* attribute for some unknown reasons. The only workaround is to rebuild the model by inputting the *bestTune* parameters manually.
+
+```{r}
+final_xgb <- xgb.train(data=dtrain, max.depth=3, eta=0.1, gamma=0, colsample_by_tree=0.4, min_child_weight=1, subsample=1,nthread = 3, nround=1000, objective = "binary:logistic")
+```
+
+With the final model re-trained, we can now evaluate train, validation, test, and live test data!
+
+First of all, confusion table and accuracy for train data:
+```{r}
+pred <- predict(final_xgb, dtrain)
+table(mmtl, pred > 0.5)
+sum(diag(table(mmtl, pred > 0.5)))/length(mmtl)
+```
+
+After that, confusion table and accuracy for validation data:
+```{r}
+pred <- predict(final_xgb, dval)
+table(mmvl, pred > 0.5)
+sum(diag(table(mmvl, pred > 0.5)))/length(mmvl)
+```
+
+Next, confusion table and accuracy for test data:
+```{r}
+pred <- predict(final_xgb, dtest)
+table(mmzl, pred > 0.5)
+sum(diag(table(mmzl, pred > 0.5)))/length(mmzl)
+```
+
+Finally, confusion table and accuracy for live data:
+```{r}
+pred <- predict(final_xgb, dlivetest)
+table(mmltl, pred > 0.5)
+sum(diag(table(mmltl, pred > 0.5)))/length(mmltl)
+```

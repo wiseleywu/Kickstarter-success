@@ -1,0 +1,95 @@
+---
+title: "Kickstarter Project - Random Forest Models Trainings"
+output: html_notebook
+---
+
+This notebook briefly walks through creating a Kickstarter project success prediction model using random forest.
+
+First of all, we load all the necessary libraries.
+
+```{r}
+library(caret) 
+library(randomForest)
+```
+
+Then we load the train and validation data prepared in previous scripts.
+
+```{r}
+train <- readRDS('../rdata/df_initital_success_train.rds')
+validate <- readRDS('../rdata/df_initital_success_validate.rds')
+```
+
+The train data is split into features (*xtrain*) and labels (*ytrain*).
+
+```{r}
+train$state <- as.factor(train$state)
+xtrain <- train[,1:ncol(train)-1]
+ytrain <- train$state
+```
+
+Using caret, a parameter sweep of `mtry` was conducted to search for the value that provides that highest accuracy.
+
+```{r}
+mtryValues <-  data.frame(mtry = seq(1, 20, by=1))
+if(file.exists('../model/random_forest_train.rds')) {
+  rf_train <- readRDS('../model/random_forest_train.rds')
+} else {
+  rf_train <- train(x = xtrain,
+                 y = ytrain,
+                 method = 'rf',
+                 nodesize = 5,
+                 ntree = 100,
+                 tuneGrid = mtryValues,
+                 trControl = trainControl(method = "cv", number=5),
+                 metric = 'Accuracy',
+                 do.trace=10
+                 )
+  saveRDS(rf_train, file='../model/random_forest_train.rds')
+}
+rf_train$bestTune
+```
+
+A plot is created to see the accuracy of various models using different `mtry`. A value of 6 provides the highest accuracy.
+
+```{r}
+ggplot(rf_train$results, aes(x=mtryValues, y=Accuracy)) + geom_point(size=3) +
+  xlab("mtry") + geom_line()
+```
+
+Using the model with `mtry=6`, it was evaluated with the validation data.
+
+```{r}
+rf_mod <- rf_train$finalModel
+
+rf_pred <- predict(rf_mod, newdata = validate)
+
+table(validate$state, rf_pred)
+print("Random Forest Accurracy")
+mean(rf_pred == validate$state)
+```
+
+Accuracy is around 79 %. Another model is created with `mtry=6`, but with `ntree` increased to 500 and see whether that would improve the model.
+
+```{r}
+rf_node<-randomForest(
+x = xtrain,
+y = ytrain,
+method = 'rf',
+nodesize = 5,
+ntree = 500,
+mtry = 6,
+metric = 'Accuracy',
+do.trace = TRUE)
+```
+
+```{r}
+#Playing around with the node size, above and below 5 always decreased accuracy
+rf_node_pred <- predict(rf_node, newdata = validate)
+
+
+#did not help
+table(validate$state, rf_node_pred)
+print("Random Forest Accurracy")
+mean(rf_node_pred == validate$state)
+
+```

@@ -1,0 +1,165 @@
+---
+title: "Kickstarter Project - Logistics Regression / LDA Models Trainings"
+output: html_notebook
+---
+
+This notebook briefly walks through creating a Kickstarter project success prediction model using Logistic Regression and LDA.
+
+First of all, we load all the necessary libraries.
+
+```{r}
+library(plyr)
+library(MASS)
+library(ROCR)
+```
+
+Define helpful function to get model accuracy, TPR, and FPR, and another function to plot ROC curve.
+
+```{r}
+# Print metrics about the model on accuracy,TPR and FPR
+metrics <- function(tab) {
+  print(paste("Accuracy is ",(tab[1,1] + tab[2,2]) / (tab[1,1] + tab[1,2] + tab[2,1] + tab[2,2])))
+  print(paste("TPR is ", (tab[2,2]) / (tab[2,1] + tab[2,2]) ))
+  print(paste("FPR is ", (tab[1,1]) / (tab[1,1] + tab[1,2]) ))
+}
+
+# Plot the roc curve for the model
+roc <- function(rocr.lda.pred,color) {
+perf <- performance(rocr.lda.pred, "tpr", "fpr")
+plot(perf, col=color,add= TRUE)
+abline(0, 1)
+as.numeric(performance(rocr.lda.pred, "auc")@y.values) 
+}
+```
+
+Then we load the train and validation data prepared in previous scripts.
+
+```{r}
+train <- readRDS('../rdata/df_initital_success_train.rds')
+validate <- readRDS('../rdata/df_initital_success_validate.rds')
+```
+
+Let's take a look at the baseline model metrics.
+
+```{r}
+# Baseline Model Metrics
+# Predict everything equal to most frequently occuring outcome i.e. state = 1
+table(validate$state)
+print(paste("Accuracy is ",table(validate$state)[2]/(nrow(validate))))
+print(paste("TPR is ",1))
+print(paste("FPR is ",1))
+
+```
+
+
+A simple logistics regression model is trained using all the features available. The model is then evaluated with validation data.
+
+```{r}
+#Logistic Regression
+#Model 1 - Includes all features
+mdl1 <- glm(state ~ ., data=train, family="binomial")
+summary(mdl1)
+predTestLog <- predict(mdl1, newdata=validate, type="response") 
+metrics(table(validate$state, predTestLog>0.5))
+```
+
+The output of the regression analysis showed that pretty much all features are significant except for a few, namely some of the project categories, some of the launch months, `deadline_holiday`, and `sp500_close_percent_change_launched_at`. The model suggested that whether the Kickstarter project ends on a holiday or not would not impact the project success. The same could be said about the S&P 500 index.
+
+
+Let's take a look at the ROC curve for the logistic regression model.
+
+```{r}
+tmp = prediction(predTestLog, validate$state)
+perf <- performance(tmp, "tpr", "fpr")
+plot(perf, col='blue')
+abline(0, 1)
+as.numeric(performance(tmp, "auc")@y.values)
+```
+
+With two features found insignificant, a new logistics regression model is trained with those two features removed.
+
+```{r}
+#Model 2 - Remove insignificant features
+mdl2 <- glm(state ~ . - deadline_holiday1 - sp500_close_percent_change_launched_at, data=train, family="binomial")
+summary(mdl2)
+predTestLog <- predict(mdl2, newdata=validate, type="response") 
+metrics(table(validate$state, predTestLog>0.5))
+tmp = prediction(predTestLog, validate$state)
+perf <- performance(tmp, "tpr", "fpr")
+as.numeric(performance(tmp, "auc")@y.values) 
+```
+
+Not much of an improvement could be seen on accuracy, TPR, and FPR with the two features removed.
+
+Next, instead of binomial, quasipoisson is used for the model, with all features included.
+
+```{r}
+#Model 3 - Model using quasipoisson
+mdl3 <- glm(state ~ ., data=train, family="quasipoisson")
+summary(mdl3)
+predTestLog <- predict(mdl3, newdata=validate, type="response") 
+metrics(table(validate$state, predTestLog>0.5))
+tmp = prediction(predTestLog, validate$state)
+perf <- performance(tmp, "tpr", "fpr")
+as.numeric(performance(tmp, "auc")@y.values)
+```
+
+Many features were seen as insignificant. A new model is created with the categories removed.
+
+```{r}
+#Model 4 - Model using quasipoisson without category (Remove insignificant features)
+remove <- grep('category', names(train))
+train_r <- train[-remove]
+mdl4 <- glm(state ~ ., data=train_r, family="quasipoisson")
+summary(mdl4)
+predTestLog <- predict(mdl4, newdata=validate, type="response") 
+metrics(table(validate$state, predTestLog>0.5))
+tmp = prediction(predTestLog, validate$state)
+perf <- performance(tmp, "tpr", "fpr")
+as.numeric(performance(tmp, "auc")@y.values) 
+```
+
+Once again, not much improvement could be seen. Let's compare ROC of all the models.
+
+```{r}
+# model 1 plot
+predTestLog <- predict(mdl1, newdata=validate, type="response") 
+tmp = prediction(predTestLog, validate$state)
+perf <- performance(tmp, "tpr", "fpr")
+plot(perf, col='blue')
+abline(0, 1)
+
+# model 2 plot
+predTestLog <- predict(mdl2, newdata=validate, type="response") 
+roc(prediction(predTestLog, validate$state),'green')
+
+# model 3 plot
+predTestLog <- predict(mdl3, newdata=validate, type="response") 
+roc(prediction(predTestLog, validate$state),'red')
+
+# model 4 plot
+predTestLog <- predict(mdl4, newdata=validate, type="response") 
+roc(prediction(predTestLog, validate$state),'yellow')
+
+legend('topleft', legend=c("Model 1", "Model 2","Model 3", "Model 4"),
+       col=c("blue","green", "red", "yellow" ), lty=c(1,1), bty='n', cex=0.75)
+```
+
+Model 2 (binomial model with insignificant features removed) clearly has the highest AOC.
+
+Now, let's take a look at using LDA to model project success.
+
+```{r}
+#LDA
+lda_mod <- lda(state ~ ., data=train)
+pred_test_lda_m <- predict(lda_mod, newdata =  validate)
+pred_test_lda_m_probs <- pred_test_lda_m$posterior[,2]
+metrics(table(validate$state, pred_test_lda_m_probs>0.5))
+rocr.lda.pred <- prediction(pred_test_lda_m_probs, validate$state)
+perf <- performance(rocr.lda.pred, "tpr", "fpr")
+plot(perf, col='black')
+abline(0, 1)
+as.numeric(performance(rocr.lda.pred, "auc")@y.values)
+```
+
+LDA does not perform as well as model 2 of the logistics regression model.

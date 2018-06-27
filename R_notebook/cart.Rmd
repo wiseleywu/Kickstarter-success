@@ -1,0 +1,85 @@
+---
+title: "Kickstarter Project - CART Models Trainings"
+output: html_notebook
+---
+
+This notebook briefly walks through creating a Kickstarter project success prediction model using CART.
+
+First of all, we load all the necessary libraries.
+
+```{r}
+library(tidyverse)
+library(rpart) # CART
+library(rpart.plot) # CART plotting
+library(caret) 
+```
+
+Then we load the train and validation data prepared in previous scripts.
+
+```{r}
+train <- readRDS('../rdata/df_initital_success_train.rds')
+validate <- readRDS('../rdata/df_initital_success_validate.rds')
+```
+
+
+Using caret, a parameter sweep of `cp` was conducted to search for the value that provides that highest accuracy.
+
+```{r}
+if (file.exists("../model/cart.rds")) {
+  cart_mod <- readRDS("../model/cart.rds")
+} else {
+  cpVals = data.frame(cp = seq(.00001, .0002, by=.00001))
+  cart_mod <- train(as.factor(state)~., 
+                      data = train,
+                      method = "rpart",
+                      tuneGrid = cpVals,
+                      trControl = trainControl(method = "cv", number=10),
+                      metric = "Accuracy")
+  saveRDS(cart_mod, file="../model/cart.rds")
+}
+cart_mod$bestTune
+```
+
+A plot is created to see the accuracy of various models using different `cp`. A value of 0.00011 provides the highest accuracy.
+
+```{r}
+ggplot(cart_mod$results, aes(x=cp, y=Accuracy)) + geom_point(size=3) +
+  xlab("Complexity Parameter (cp)") + geom_line()
+```
+
+With the best CART model, a classification tree was plotted. However the tree was way too complex to be interpretable. 
+
+```{r}
+#Best cart model 
+best_cart_mod <- cart_mod$finalModel
+
+#Classification Tree Plot
+prp(best_cart_mod, digits=3)
+```
+
+We could also obtain the variable importance from the best CART model.
+
+```{r}
+# get variable importance as dataframe
+impt <- best_cart_mod$variable.importance
+var.impt <- as.data.frame(impt)
+var.impt$importance <- var.impt$impt
+var.impt$features <- names(best_cart_mod$variable.importance)
+
+# plot importance
+ggplot(var.impt, aes(x=features, y=importance)) + geom_bar(stat='identity') + coord_flip() + scale_x_discrete(limits=rev(var.impt$features))
+```
+
+As seen in the graph above, `unemployment rate` is the most important feature, with `tier.low` and `goal` as second and third.
+
+Finally, let's see how does the model perform on validation data.
+
+```{r}
+#Cart Predictions with Best Tune Model
+cart_pred <- predict(best_cart_mod, newdata=validate, type="class")
+table(validate$state, cart_pred)
+
+#CART Accuracy
+mean(cart_pred == validate$state)
+
+```
